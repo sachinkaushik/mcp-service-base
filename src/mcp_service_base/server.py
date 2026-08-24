@@ -211,6 +211,26 @@ class ServiceServer:
             description=f"[gate={gate_level}] {tool.description}",
         )(gated)
 
-    def run(self) -> None:
-        """Start the MCP server (stdio transport by default)."""
-        self.to_mcp().run()
+    def run(
+        self,
+        transport: str = "stdio",
+        host: str | None = None,
+        port: int | None = None,
+    ) -> None:
+        """Start the MCP server.
+
+        transport: ``stdio`` (default, local/CLI) or ``streamable-http`` / ``sse``
+        for a long-lived networked server (containers, so the agent can reach it).
+        host/port apply only to the HTTP transports.
+        """
+        app = self.to_mcp()
+        if transport == "stdio":
+            app.run("stdio")
+            return
+        kwargs: dict[str, Any] = {}
+        if host is not None:
+            kwargs["host"] = host
+        if port is not None:
+            kwargs["port"] = port
+        app.run(transport, **kwargs)
+
