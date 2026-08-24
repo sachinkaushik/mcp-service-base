@@ -34,6 +34,13 @@ class _Tool:
     schema: dict[str, Any]
 
 
+def _docstring(fn: Callable[..., Any]) -> str:
+    """First paragraph of a function's docstring, used as the tool description."""
+    import inspect
+
+    return inspect.getdoc(fn) or ""
+
+
 @dataclass
 class _Subscription:
     event_type: str
@@ -71,12 +78,17 @@ class ServiceServer:
         self._event_types[name] = schema
 
     def read_tool(
-        self, name: str, description: str = "", schema: dict | None = None
+        self, name: str, description: str | None = None, schema: dict | None = None
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register a broadly-exposed read tool."""
+        """Register a broadly-exposed read tool.
+
+        If ``description`` is omitted, the function's docstring is used (the
+        standard MCP convention).
+        """
 
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self._read_tools[name] = _Tool(name, fn, description, schema or {})
+            desc = description if description is not None else _docstring(fn)
+            self._read_tools[name] = _Tool(name, fn, desc, schema or {})
             return fn
 
         return deco
@@ -85,15 +97,19 @@ class ServiceServer:
         self,
         name: str,
         level: GateLevel,
-        description: str = "",
+        description: str | None = None,
         schema: dict | None = None,
         max_calls: int | None = None,
         per_seconds: float = 60.0,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register an action tool and its policy-gate level + rate limit."""
+        """Register an action tool and its policy-gate level + rate limit.
+
+        If ``description`` is omitted, the function's docstring is used.
+        """
 
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self._act_tools[name] = _Tool(name, fn, description, schema or {})
+            desc = description if description is not None else _docstring(fn)
+            self._act_tools[name] = _Tool(name, fn, desc, schema or {})
             self.policy.register(
                 ActionSpec(
                     name=name,
