@@ -159,20 +159,27 @@ class ServiceServer:
 
     # -- MCP binding (lazy import) ----------------------------------------
 
-    def to_mcp(self):  # noqa: ANN201 - returns a FastMCP instance
-        """Build a FastMCP server exposing describe/subscribe/read/act.
+    def to_mcp(self):  # noqa: ANN201 - returns an MCP server instance
+        """Build an MCP server exposing describe/subscribe/read/act.
+
+        Works with both the current SDK (``mcp>=2`` exposes ``MCPServer``) and the
+        1.x line (``mcp.server.fastmcp.FastMCP``). Both share the same
+        ``.tool()`` decorator and ``.run()`` API.
 
         Requires the ``mcp`` extra: ``pip install mcp-service-base[mcp]``.
         """
         try:
-            from mcp.server.fastmcp import FastMCP
-        except ImportError as exc:  # pragma: no cover - env-dependent
-            raise RuntimeError(
-                "The MCP layer needs the 'mcp' package. "
-                "Install with: pip install mcp-service-base[mcp]"
-            ) from exc
+            from mcp.server import MCPServer as _Server  # mcp >= 2.0
+        except ImportError:
+            try:
+                from mcp.server.fastmcp import FastMCP as _Server  # mcp 1.x
+            except ImportError as exc:  # pragma: no cover - env-dependent
+                raise RuntimeError(
+                    "The MCP layer needs the 'mcp' package. "
+                    "Install with: pip install mcp-service-base[mcp]"
+                ) from exc
 
-        app = FastMCP(self.service)
+        app = _Server(self.service)
 
         @app.tool(name="describe", description="Describe this service's contract.")
         def _describe() -> dict:
