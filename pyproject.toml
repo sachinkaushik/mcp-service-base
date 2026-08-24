@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-service-base"
+version = "0.1.0"
+description = "Shared contract library for Central QSR Agent services: event envelope, durable log, delivery fan-out, policy gate, telemetry, and MCP scaffolding."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# The MCP server layer needs the MCP SDK. Everything else is stdlib-only.
+mcp = ["mcp>=1.2.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
