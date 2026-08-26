@@ -10,6 +10,8 @@ SQLite for single-box demos; a PostgreSQL adapter implements the same
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import threading
 from typing import Iterator, Protocol
@@ -108,3 +110,86 @@ class SQLiteLog:
 
     def close(self) -> None:
         self._conn.close()
+
+
+class JSONLFileLog:
+    """File-backed durable log (one JSON object per line).
+
+    Same ``DurableLog`` contract as SQLiteLog: ordered by ``seq``, idempotent on
+    ``ref_id``, restart-safe (state is rebuilt from the file on open), replayable.
+    Good for environments where a plain append-only file is preferred over SQLite.
+    """
+
+    def __init__(self, path: str, service: str = "unknown") -> None:
+        self._service = service
+        self._path = path
+        self._lock = threading.Lock()
+        self._seen: set[str] = set()
+        self._seq = 0
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self._rebuild_state()
+
+    def _rebuild_state(self) -> None:
+        if not os.path.exists(self._path):
+            return
+        with open(self._path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                self._seq = max(self._seq, int(rec["seq"]))
+                self._seen.add(rec["event"]["ref_id"])
+
+    def append(self, event: EventEnvelope) -> int:
+        with self._lock:
+            if event.ref_id in self._seen:
+                return self._seq_of(event.ref_id)
+            self._seq += 1
+            rec = {"seq": self._seq, "event": json.loads(event.to_json())}
+            with open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            self._seen.add(event.ref_id)
+            return self._seq
+
+    def _seq_of(self, ref_id: str) -> int:
+        for rec in self._iter_records():
+            if rec["event"]["ref_id"] == ref_id:
+                return int(rec["seq"])
+        return 0
+
+    def _iter_records(self) -> Iterator[dict]:
+        if not os.path.exists(self._path):
+            return
+        with open(self._path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+
+    def read(
+        self,
+        event_type: str | None = None,
+        since_seq: int = 0,
+        limit: int = 1000,
+    ) -> list[EventEnvelope]:
+        out: list[EventEnvelope] = []
+        with self._lock:
+            for rec in self._iter_records():
+                if int(rec["seq"]) <= since_seq:
+                    continue
+                ev = rec["event"]
+                if event_type is not None and ev["event_type"] != event_type:
+                    continue
+                out.append(EventEnvelope(**ev))
+                if len(out) >= limit:
+                    break
+        return out
+
+    def replay(self, from_seq: int = 0) -> Iterator[EventEnvelope]:
+        with self._lock:
+            records = [r for r in self._iter_records() if int(r["seq"]) > from_seq]
+        for rec in records:
+            yield EventEnvelope(**rec["event"])

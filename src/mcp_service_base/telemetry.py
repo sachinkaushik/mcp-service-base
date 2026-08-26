@@ -1,7 +1,9 @@
 """Telemetry — the measurement spine (walkthrough §5).
 
-Minimal timing spans so every read/act/emit is measurable from day one. Records
-are kept in-memory and can be drained by a deployment exporter. No external deps.
+Metrics are a **strategy**: anything implementing ``MetricsBackend`` (a ``span``
+context manager + ``drain``) can be injected into a service. Two implementations
+ship here — in-memory ``Telemetry`` (default) and ``NullTelemetry`` (no-op) —
+and a deployment can supply its own (OpenTelemetry, Prometheus, …).
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Iterator, Protocol, runtime_checkable
 
 
 @dataclass
@@ -18,6 +20,17 @@ class Span:
     duration_ms: float
     ok: bool
     ts_ms: int
+
+
+@runtime_checkable
+class MetricsBackend(Protocol):
+    """Strategy interface for metrics backends."""
+
+    def span(self, name: str):  # returns a context manager
+        ...
+
+    def drain(self) -> list[Span]:
+        ...
 
 
 @dataclass
@@ -49,3 +62,18 @@ class Telemetry:
         """Return and clear collected spans (for an exporter to ship)."""
         spans, self._spans = self._spans, []
         return spans
+
+
+@dataclass
+class NullTelemetry:
+    """No-op metrics backend for services that opt out of measurement."""
+
+    service: str = "unknown"
+
+    @contextmanager
+    def span(self, name: str) -> Iterator[None]:
+        yield
+
+    def drain(self) -> list[Span]:
+        return []
+

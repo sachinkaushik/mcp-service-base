@@ -8,17 +8,18 @@ schemas plus read/act tools.
 """
 
 from .envelope import EventEnvelope, new_event
-from .log import DurableLog, SQLiteLog
+from .log import DurableLog, SQLiteLog, JSONLFileLog
 from .delivery import Delivery, Sink, WebhookSink, EventHubSink, DisabledSink
 from .policy import PolicyGate, PolicyDecision, ActionSpec, GateLevel
-from .telemetry import Telemetry, Span
-from .server import ServiceServer
+from .telemetry import Telemetry, NullTelemetry, MetricsBackend, Span
+from .server import ServiceServer, ServiceConfig
 
 __all__ = [
     "EventEnvelope",
     "new_event",
     "DurableLog",
     "SQLiteLog",
+    "JSONLFileLog",
     "Delivery",
     "Sink",
     "WebhookSink",
@@ -29,8 +30,11 @@ __all__ = [
     "ActionSpec",
     "GateLevel",
     "Telemetry",
+    "NullTelemetry",
+    "MetricsBackend",
     "Span",
     "ServiceServer",
+    "ServiceConfig",
 ]
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"

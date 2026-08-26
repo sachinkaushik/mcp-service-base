@@ -16,14 +16,15 @@ library (emit, describe, log, policy) works and is testable without it installed
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .delivery import Delivery, DisabledSink
+from .delivery import Delivery, DisabledSink, WebhookSink
 from .envelope import EventEnvelope, new_event
-from .log import DurableLog, SQLiteLog
+from .log import DurableLog, JSONLFileLog, SQLiteLog
 from .policy import ActionSpec, GateLevel, PolicyGate
-from .telemetry import Telemetry
+from .telemetry import MetricsBackend, NullTelemetry, Telemetry
 
 
 @dataclass
@@ -49,15 +50,40 @@ class _Subscription:
 
 
 @dataclass
+class ServiceConfig:
+    """Façade config — build a ServiceServer without touching internal classes.
+
+    Selects the log strategy, delivery strategy, metrics strategy, and timeout.
+    """
+
+    service: str
+    store_id: str
+    log_backend: str = "sqlite"   # sqlite | jsonl | memory
+    log_path: str = ":memory:"
+    delivery: str = "off"          # off | webhook
+    webhook_url: str | None = None
+    metrics: str = "memory"        # memory | null
+    tool_timeout_s: float | None = None
+
+
+@dataclass
 class ServiceServer:
-    """One per service. Domain code registers tools; the core does the plumbing."""
+    """One per service. Domain code registers tools; the core does the plumbing.
+
+    This is the **façade**: services use ``read_tool``/``act_tool``/``emit``/``run``
+    and never touch the log, delivery, policy, or metrics classes directly. Use
+    :meth:`from_config` to select backends without importing internals.
+    """
 
     service: str
     store_id: str
     log: DurableLog = field(default=None)  # type: ignore[assignment]
     delivery: Delivery = field(default=None)  # type: ignore[assignment]
     policy: PolicyGate = field(default_factory=PolicyGate)
-    telemetry: Telemetry = field(default=None)  # type: ignore[assignment]
+    telemetry: MetricsBackend = field(default=None)  # type: ignore[assignment]
+    # Soft per-tool timeout (seconds); None disables. Runs the tool in a worker
+    # thread and raises TimeoutError if it overruns.
+    tool_timeout_s: float | None = None
 
     _event_types: dict[str, dict] = field(default_factory=dict)
     _read_tools: dict[str, _Tool] = field(default_factory=dict)
@@ -71,6 +97,56 @@ class ServiceServer:
             self.delivery = Delivery(sinks=[DisabledSink()])
         if self.telemetry is None:
             self.telemetry = Telemetry(service=self.service)
+
+    @classmethod
+    def from_config(cls, cfg: ServiceConfig) -> "ServiceServer":
+        """Build a ServiceServer from config, selecting log/delivery/metrics strategies."""
+        if cfg.log_backend in ("sqlite", "memory"):
+            path = ":memory:" if cfg.log_backend == "memory" else cfg.log_path
+            log: DurableLog = SQLiteLog(path=path, service=cfg.service)
+        elif cfg.log_backend == "jsonl":
+            log = JSONLFileLog(path=cfg.log_path, service=cfg.service)
+        else:
+            raise ValueError(f"unknown log_backend: {cfg.log_backend}")
+
+        if cfg.delivery == "off":
+            delivery = Delivery(sinks=[DisabledSink()])
+        elif cfg.delivery == "webhook":
+            if not cfg.webhook_url:
+                raise ValueError("delivery='webhook' requires webhook_url")
+            delivery = Delivery(sinks=[WebhookSink(cfg.webhook_url)])
+        else:
+            raise ValueError(f"unknown delivery: {cfg.delivery}")
+
+        telemetry: MetricsBackend = (
+            NullTelemetry(cfg.service) if cfg.metrics == "null" else Telemetry(cfg.service)
+        )
+        return cls(
+            service=cfg.service,
+            store_id=cfg.store_id,
+            log=log,
+            delivery=delivery,
+            telemetry=telemetry,
+            tool_timeout_s=cfg.tool_timeout_s,
+        )
+
+    # -- internal invocation (timeout strategy) ---------------------------
+
+    def _invoke(self, fn: Callable[..., Any], args: dict[str, Any]) -> Any:
+        """Call a tool, enforcing the soft timeout when configured."""
+        if self.tool_timeout_s is None:
+            return fn(**args)
+        fut = self._get_executor().submit(fn, **args)
+        return fut.result(timeout=self.tool_timeout_s)
+
+    def _get_executor(self):
+        ex = getattr(self, "_executor_obj", None)
+        if ex is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            ex = ThreadPoolExecutor(max_workers=8, thread_name_prefix=self.service)
+            self._executor_obj = ex
+        return ex
 
     # -- registration -----------------------------------------------------
 
@@ -147,7 +223,7 @@ class ServiceServer:
                 "reason": decision.reason,
             }
         with self.telemetry.span(f"act:{name}"):
-            result = self._act_tools[name].fn(**args)
+            result = self._invoke(self._act_tools[name].fn, args)
         return {"executed": True, "level": decision.level.value, "result": result}
 
     def subscribe(self, event_type: str, condition: str, callback_url: str) -> None:
@@ -207,7 +283,9 @@ class ServiceServer:
             return {"subscribed": event_type, "condition": condition}
 
         for tool in self._read_tools.values():
-            app.tool(name=tool.name, description=tool.description)(tool.fn)
+            app.tool(name=tool.name, description=tool.description)(
+                self._wrap_read(tool)
+            )
 
         # Action tools are exposed but routed through the gate, never called raw.
         for tool in self._act_tools.values():
@@ -215,13 +293,28 @@ class ServiceServer:
 
         return app
 
+    def _wrap_read(self, tool: _Tool) -> Callable[..., Any]:
+        """Wrap a read tool with telemetry + timeout, preserving its signature.
+
+        ``functools.wraps`` sets ``__wrapped__`` so the MCP SDK still derives the
+        input schema from the original function's typed parameters.
+        """
+
+        @functools.wraps(tool.fn)
+        def wrapper(**args: Any) -> Any:
+            with self.telemetry.span(f"read:{tool.name}"):
+                return self._invoke(tool.fn, args)
+
+        return wrapper
+
     def _bind_gated_action(self, app, tool: _Tool) -> None:
         gate_level = self.policy._actions[tool.name].level.value
 
+        # functools.wraps preserves the signature so the SDK exposes the params.
+        @functools.wraps(tool.fn)
         def gated(**args: Any) -> dict:
             return self.call_action(tool.name, **args)
 
-        gated.__name__ = tool.name
         app.tool(
             name=tool.name,
             description=f"[gate={gate_level}] {tool.description}",
