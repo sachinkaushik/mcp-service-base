@@ -75,3 +75,88 @@ mcp-service-base[mcp] @ git+https://github.com/sachinkaushik/mcp-service-base.gi
 
 Generic base, proven on the **SLP Suspicious-Activity (SAD)** service (sample data
 for now). Hardened as more services are built on it.
+
+---
+
+## Internals — how each file works
+
+The package lives in `src/mcp_service_base/`. `server.py` is the conductor; the
+other files are the pieces it orchestrates.
+
+```mermaid
+flowchart TB
+    INIT["__init__.py — public exports"]
+    ENV["envelope.py — the event shape"]
+    LOG["log.py — durable storage"]
+    DEL["delivery.py — fan-out to agent"]
+    POL["policy.py — action safety"]
+    TEL["telemetry.py — metrics"]
+    SRV["server.py — ServiceServer (façade)"]
+    SRV --> ENV & LOG & DEL & POL & TEL
+    INIT --> SRV
+```
+
+### `envelope.py` — the event shape
+- `EventEnvelope` — frozen dataclass: `event_type`, `service`, `store_id`, `payload`, `ref_id`, `ts_ms`, `schema_version`.
+- `new_event(...)` — factory that auto-fills `ref_id` and `ts_ms`.
+- `to_json()` / `from_json()` — serialize for storage and transport.
+- `ref_id` is what makes replay idempotent.
+
+### `log.py` — durable log (Strategy)
+- `DurableLog` — Protocol (interface): `append()`, `read()`, `replay()`.
+- `SQLiteLog` — default; autoincrement `seq` (order), `UNIQUE ref_id` (idempotency), WAL (restart-safe).
+- `JSONLFileLog` — same contract, append-only JSON-lines file; rebuilds state on open.
+- `append()` = persist + dedupe on `ref_id`; `read()` = query; `replay()` = yield in order.
+
+### `delivery.py` — fan-out to the agent (Strategy)
+- `Sink` — Protocol: `push(event) -> bool`.
+- `DisabledSink` (off), `WebhookSink` (HTTP POST), `EventHubSink` (shared hub adapter).
+- `Delivery.dispatch()` — sends to all sinks with bounded retries + backoff; nothing dropped silently.
+
+### `policy.py` — action safety gate
+- `GateLevel` — `AUTOMATIC | NOTIFY | NEEDS_APPROVAL | BLOCKED`.
+- `ActionSpec` — gate level + optional rate limit (sliding window).
+- `PolicyGate.evaluate(name, args)` — allow-list check → decision; unregistered = blocked, approval = human callback.
+- Runs **before** any action; the LLM proposes, plain code decides.
+
+### `telemetry.py` — metrics (Strategy)
+- `Span` — one timing record.
+- `MetricsBackend` — Protocol (`span()` + `drain()`).
+- `Telemetry` (in-memory, default) and `NullTelemetry` (no-op).
+
+### `server.py` — `ServiceServer` (Façade + Adapter)
+- `ServiceConfig` + `from_config()` — build a server by choosing log/delivery/metrics/timeout, no internal imports.
+- `register_event_type()` — declares an event schema (feeds `describe`).
+- `read_tool()` / `act_tool()` — decorators; description defaults to the docstring; `act_tool` also registers with the Policy Gate.
+- `emit()` — write path: `new_event → log.append (first) → delivery.dispatch`, inside a telemetry span.
+- `call_action()` — act path: `policy.evaluate` → run if allowed (with timeout + telemetry).
+- `describe()` — returns the full contract.
+- `to_mcp()` (Adapter) — builds the MCP server: lazy-imports the SDK (2.x `MCPServer` / 1.x `FastMCP`), auto-adds `describe` + `subscribe`, binds read tools (telemetry + timeout, signature preserved via `functools.wraps`) and act tools (through the gate).
+- `run(transport, host, port)` — starts it (`stdio` local, `streamable-http`/`sse` networked).
+
+### `__init__.py` — public API
+- The curated names a service imports (`ServiceServer`, `ServiceConfig`, `GateLevel`, log/sink/telemetry classes) + `__version__`.
+
+---
+
+## End-to-end paths
+
+**Write path (an event arrives):**
+```
+service.emit() → new_event()          [envelope.py]
+             → log.append()           [log.py]  (first, idempotent on ref_id)
+             → delivery.dispatch()     [delivery.py]  (fan-out + retries)
+             → telemetry span          [telemetry.py]
+```
+
+**Read / act path (the agent calls):**
+```
+agent → describe / subscribe          [auto, server.py]
+      → read tool → your fn → log.read()          [log.py]
+      → act tool  → policy.evaluate()  [policy.py] → your fn (only if allowed)
+```
+
+`server.py` is the façade a service uses; `envelope / log / delivery / policy /
+telemetry` are the pluggable pieces it orchestrates; and the agent only ever sees
+the uniform describe/subscribe/read/act contract.
+
