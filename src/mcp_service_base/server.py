@@ -254,22 +254,31 @@ class ServiceServer:
     def to_mcp(self):  # noqa: ANN201 - returns an MCP server instance
         """Build an MCP server exposing describe/subscribe/read/act.
 
-        Works with both the current SDK (``mcp>=2`` exposes ``MCPServer``) and the
-        1.x line (``mcp.server.fastmcp.FastMCP``). Both share the same
-        ``.tool()`` decorator and ``.run()`` API.
+        Backend is auto-selected in this order:
+        1. ``fastmcp`` (standalone FastMCP 2.x, https://gofastmcp.com)
+        2. ``mcp.server.MCPServer`` (official mcp >= 2.0)
+        3. ``mcp.server.fastmcp.FastMCP`` (official mcp 1.x)
 
-        Requires the ``mcp`` extra: ``pip install mcp-service-base[mcp]``.
+        All three expose the same ``.tool()`` decorator and ``.run()`` API and
+        speak the same MCP protocol on the wire. Install one of:
+
+        - ``pip install mcp-service-base[mcp]``      (official SDK)
+        - ``pip install mcp-service-base[fastmcp]``  (standalone FastMCP 2.x)
         """
         try:
-            from mcp.server import MCPServer as _Server  # mcp >= 2.0
+            from fastmcp import FastMCP as _Server  # standalone fastmcp 2.x
         except ImportError:
             try:
-                from mcp.server.fastmcp import FastMCP as _Server  # mcp 1.x
-            except ImportError as exc:  # pragma: no cover - env-dependent
-                raise RuntimeError(
-                    "The MCP layer needs the 'mcp' package. "
-                    "Install with: pip install mcp-service-base[mcp]"
-                ) from exc
+                from mcp.server import MCPServer as _Server  # mcp >= 2.0
+            except ImportError:
+                try:
+                    from mcp.server.fastmcp import FastMCP as _Server  # mcp 1.x
+                except ImportError as exc:  # pragma: no cover - env-dependent
+                    raise RuntimeError(
+                        "No MCP backend found. Install one of: "
+                        "'pip install mcp-service-base[mcp]' or "
+                        "'pip install mcp-service-base[fastmcp]'"
+                    ) from exc
 
         app = _Server(self.service)
 

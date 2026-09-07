@@ -10,8 +10,9 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-# The MCP server layer needs the MCP SDK. Everything else is stdlib-only.
-mcp = ["mcp>=1.2.0"]
+# Pick one MCP server backend. Both speak the same MCP protocol on the wire.
+mcp = ["mcp>=1.2.0"]                  # official Anthropic MCP SDK
+fastmcp = ["fastmcp>=2.0.0"]           # standalone FastMCP 2.x (gofastmcp.com)
 
 [tool.setuptools.packages.find]
 where = ["src"]

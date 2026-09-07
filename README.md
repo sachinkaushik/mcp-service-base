@@ -25,9 +25,13 @@ imported lazily, so everything except `run()`/`to_mcp()` works without it.
 ## Install
 
 ```bash
-pip install -e .            # core only (stdlib)
-pip install -e .[mcp]       # + MCP server layer
+pip install -e .              # core only (stdlib)
+pip install -e .[mcp]         # + official MCP SDK backend
+pip install -e .[fastmcp]     # + standalone FastMCP 2.x backend (gofastmcp.com)
 ```
+
+`to_mcp()` auto-picks whichever backend is installed. Both speak the same MCP
+protocol on the wire.
 
 ## Writing a service (the whole job)
 
